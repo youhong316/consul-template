@@ -1,100 +1,213 @@
 package dependency
 
 import (
+	"fmt"
 	"io/ioutil"
+	"os"
 	"testing"
 	"time"
 
-	"github.com/hashicorp/consul-template/test"
+	"github.com/stretchr/testify/assert"
 )
 
-func TestFileFetch(t *testing.T) {
-	data := `{"foo":"bar"}`
-	inTemplate := test.CreateTempfile([]byte(data), t)
-	defer test.DeleteTempfile(inTemplate, t)
+func init() {
+	FileQuerySleepTime = 50 * time.Millisecond
+}
 
-	dep := &File{
-		rawKey: inTemplate.Name(),
+func TestNewFileQuery(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		i    string
+		exp  *FileQuery
+		err  bool
+	}{
+		{
+			"empty",
+			"",
+			nil,
+			true,
+		},
+		{
+			"path",
+			"path",
+			&FileQuery{
+				path: "path",
+			},
+			false,
+		},
 	}
 
-	read, _, err := dep.Fetch(nil, nil)
-	if err != nil {
-		t.Fatal(err)
-	}
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", i, tc.name), func(t *testing.T) {
+			act, err := NewFileQuery(tc.i)
+			if (err != nil) != tc.err {
+				t.Fatal(err)
+			}
 
-	if read != data {
-		t.Fatalf("expected %q to be %q", read, data)
+			if act != nil {
+				act.stopCh = nil
+			}
+
+			assert.Equal(t, tc.exp, act)
+		})
 	}
 }
 
-func TestFileFetch_waits(t *testing.T) {
-	data := `{"foo":"bar"}`
-	inTemplate := test.CreateTempfile([]byte(data), t)
-	defer test.DeleteTempfile(inTemplate, t)
+func TestFileQuery_Fetch(t *testing.T) {
+	t.Parallel()
 
-	dep := &File{
-		rawKey: inTemplate.Name(),
-	}
-
-	_, _, err := dep.Fetch(nil, nil)
+	f, err := ioutil.TempFile("", "")
 	if err != nil {
 		t.Fatal(err)
 	}
-
-	doneCh := make(chan struct{})
-	errCh := make(chan error)
-	go func() {
-		if _, _, err := dep.Fetch(nil, nil); err != nil {
-			errCh <- err
-			return
-		}
-		close(doneCh)
-	}()
-
-	select {
-	case err := <-errCh:
-		t.Fatal(err)
-	case <-doneCh:
-		t.Fatal("received data, but should not have")
-	case <-time.After(1000 * time.Nanosecond):
-		return
-	}
-}
-
-func TestFileFetch_firesChanges(t *testing.T) {
-	data := `{"foo":"bar"}`
-	inTemplate := test.CreateTempfile([]byte(data), t)
-	defer test.DeleteTempfile(inTemplate, t)
-
-	dep := &File{
-		rawKey: inTemplate.Name(),
-	}
-
-	_, _, err := dep.Fetch(nil, nil)
-	if err != nil {
+	defer os.Remove(f.Name())
+	if _, err := f.WriteString("hello world"); err != nil {
 		t.Fatal(err)
 	}
 
-	dataCh := make(chan interface{})
-	errCh := make(chan error)
-	go func() {
-		data, _, err := dep.Fetch(nil, nil)
+	cases := []struct {
+		name string
+		i    string
+		exp  string
+		err  bool
+	}{
+		{
+			"non_existent",
+			"/not/a/real/path/ever",
+			"",
+			true,
+		},
+		{
+			"contents",
+			f.Name(),
+			"hello world",
+			false,
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", i, tc.name), func(t *testing.T) {
+			d, err := NewFileQuery(tc.i)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			act, _, err := d.Fetch(nil, nil)
+			if (err != nil) != tc.err {
+				t.Fatal(err)
+			}
+
+			assert.Equal(t, tc.exp, act)
+		})
+	}
+
+	t.Run("stops", func(t *testing.T) {
+		f, err := ioutil.TempFile("", "")
 		if err != nil {
-			errCh <- err
-			return
+			t.Fatal(err)
 		}
-		dataCh <- data
-	}()
+		defer os.Remove(f.Name())
 
-	newData := `{"bar": "baz"}`
-	ioutil.WriteFile(inTemplate.Name(), []byte(newData), 0644)
-
-	select {
-	case d := <-dataCh:
-		if d != newData {
-			t.Fatalf("expected %q to be %q", d, newData)
+		d, err := NewFileQuery(f.Name())
+		if err != nil {
+			t.Fatal(err)
 		}
-	case <-time.After(5 * time.Second):
-		t.Fatal("did not receive data from file changes")
+
+		errCh := make(chan error, 1)
+		go func() {
+			for {
+				_, _, err := d.Fetch(nil, nil)
+				if err != nil {
+					errCh <- err
+					return
+				}
+			}
+		}()
+
+		d.Stop()
+
+		select {
+		case err := <-errCh:
+			if err != ErrStopped {
+				t.Fatal(err)
+			}
+		case <-time.After(100 * time.Millisecond):
+			t.Errorf("did not stop")
+		}
+	})
+
+	t.Run("fires_changes", func(t *testing.T) {
+		f, err := ioutil.TempFile("", "")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := ioutil.WriteFile(f.Name(), []byte("hello"), 0644); err != nil {
+			t.Fatal(err)
+		}
+		defer os.Remove(f.Name())
+
+		d, err := NewFileQuery(f.Name())
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		dataCh := make(chan interface{}, 1)
+		errCh := make(chan error, 1)
+		go func() {
+			for {
+				data, _, err := d.Fetch(nil, nil)
+				if err != nil {
+					errCh <- err
+					return
+				}
+				dataCh <- data
+			}
+		}()
+		defer d.Stop()
+
+		select {
+		case err := <-errCh:
+			t.Fatal(err)
+		case <-dataCh:
+		}
+
+		if err := ioutil.WriteFile(f.Name(), []byte("goodbye"), 0644); err != nil {
+			t.Fatal(err)
+		}
+
+		select {
+		case err := <-errCh:
+			t.Fatal(err)
+		case data := <-dataCh:
+			assert.Equal(t, data, "goodbye")
+		}
+	})
+}
+
+func TestFileQuery_String(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		i    string
+		exp  string
+	}{
+		{
+			"path",
+			"path",
+			"file(path)",
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", i, tc.name), func(t *testing.T) {
+			d, err := NewFileQuery(tc.i)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assert.Equal(t, tc.exp, d.String())
+		})
 	}
 }

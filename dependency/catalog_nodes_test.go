@@ -1,61 +1,164 @@
 package dependency
 
 import (
-	"reflect"
+	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-func TestCatalogNodesFetch(t *testing.T) {
-	clients, consul := testConsulServer(t)
-	defer consul.Stop()
+func TestNewCatalogNodesQuery(t *testing.T) {
+	t.Parallel()
 
-	dep := &CatalogNodes{rawKey: "global"}
-	results, _, err := dep.Fetch(clients, nil)
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name string
+		i    string
+		exp  *CatalogNodesQuery
+		err  bool
+	}{
+		{
+			"empty",
+			"",
+			&CatalogNodesQuery{},
+			false,
+		},
+		{
+			"node",
+			"node",
+			nil,
+			true,
+		},
+		{
+			"dc",
+			"@dc1",
+			&CatalogNodesQuery{
+				dc: "dc1",
+			},
+			false,
+		},
+		{
+			"near",
+			"~node1",
+			&CatalogNodesQuery{
+				near: "node1",
+			},
+			false,
+		},
+		{
+			"dc_near",
+			"@dc1~node1",
+			&CatalogNodesQuery{
+				dc:   "dc1",
+				near: "node1",
+			},
+			false,
+		},
 	}
 
-	typed, ok := results.([]*Node)
-	if !ok {
-		t.Fatal("could not convert result to []*Node")
-	}
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", i, tc.name), func(t *testing.T) {
+			act, err := NewCatalogNodesQuery(tc.i)
+			if (err != nil) != tc.err {
+				t.Fatal(err)
+			}
 
-	if typed[0].Address != "127.0.0.1" {
-		t.Errorf("expected %q to be %q", typed[0].Address, "127.0.0.1")
+			if act != nil {
+				act.stopCh = nil
+			}
+
+			assert.Equal(t, tc.exp, act)
+		})
 	}
 }
 
-func TestCatalogNodesHashCode_isUnique(t *testing.T) {
-	dep1 := &CatalogNodes{rawKey: ""}
-	dep2 := &CatalogNodes{rawKey: "@nyc1"}
-	if dep1.HashCode() == dep2.HashCode() {
-		t.Errorf("expected HashCode to be unique")
+func TestCatalogNodesQuery_Fetch(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		i    string
+		exp  []*Node
+	}{
+		{
+			"all",
+			"",
+			[]*Node{
+				&Node{
+					Node:       testConsul.Config.NodeName,
+					Address:    testConsul.Config.Bind,
+					Datacenter: "dc1",
+					TaggedAddresses: map[string]string{
+						"lan": "127.0.0.1",
+						"wan": "127.0.0.1",
+					},
+					Meta: map[string]string{
+						"consul-network-segment": "",
+					},
+				},
+			},
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", i, tc.name), func(t *testing.T) {
+			d, err := NewCatalogNodesQuery(tc.i)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			act, _, err := d.Fetch(testClients, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			if act != nil {
+				for _, n := range act.([]*Node) {
+					n.ID = ""
+				}
+			}
+
+			assert.Equal(t, tc.exp, act)
+		})
 	}
 }
 
-func TestParseCatalogNodes_emptyString(t *testing.T) {
-	nd, err := ParseCatalogNodes("")
-	if err != nil {
-		t.Fatal(err)
+func TestCatalogNodesQuery_String(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		i    string
+		exp  string
+	}{
+		{
+			"empty",
+			"",
+			"catalog.nodes",
+		},
+		{
+			"datacenter",
+			"@dc1",
+			"catalog.nodes(@dc1)",
+		},
+		{
+			"near",
+			"~node1",
+			"catalog.nodes(~node1)",
+		},
+		{
+			"datacenter_near",
+			"@dc1~node1",
+			"catalog.nodes(@dc1~node1)",
+		},
 	}
 
-	expected := &CatalogNodes{}
-	if !reflect.DeepEqual(nd, expected) {
-		t.Errorf("expected %+v to equal %+v", nd, expected)
-	}
-}
-
-func TestParseCatalogNodes_dataCenter(t *testing.T) {
-	nd, err := ParseCatalogNodes("@nyc1")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := &CatalogNodes{
-		rawKey:     "@nyc1",
-		DataCenter: "nyc1",
-	}
-	if !reflect.DeepEqual(nd, expected) {
-		t.Errorf("expected %+v to equal %+v", nd, expected)
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", i, tc.name), func(t *testing.T) {
+			d, err := NewCatalogNodesQuery(tc.i)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assert.Equal(t, tc.exp, d.String())
+		})
 	}
 }

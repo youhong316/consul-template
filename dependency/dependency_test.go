@@ -3,39 +3,104 @@ package dependency
 import (
 	"fmt"
 	"io/ioutil"
+	"log"
 	"net"
+	"os"
 	"reflect"
 	"testing"
+	"time"
 
-	consulapi "github.com/hashicorp/consul/api"
+	"github.com/hashicorp/consul/api"
 	"github.com/hashicorp/consul/testutil"
-	vaultapi "github.com/hashicorp/vault/api"
+	"github.com/hashicorp/vault/builtin/logical/pki"
+	"github.com/hashicorp/vault/builtin/logical/transit"
 	"github.com/hashicorp/vault/http"
 	"github.com/hashicorp/vault/logical"
+	"github.com/hashicorp/vault/physical/inmem"
 	"github.com/hashicorp/vault/vault"
+
+	logxi "github.com/mgutz/logxi/v1"
 )
 
-func TestCanShare(t *testing.T) {
-	vs := &VaultSecret{}
-	vt := &VaultToken{}
-	file := &File{}
-	service := &HealthServices{}
+var testConsul *testutil.TestServer
+var testClients *ClientSet
 
-	if vs.CanShare() {
-		t.Fatalf("should not share vault")
+func TestMain(m *testing.M) {
+	consul, err := testutil.NewTestServerConfig(func(c *testutil.TestServerConfig) {
+		c.LogLevel = "warn"
+		c.Stdout = ioutil.Discard
+		c.Stderr = ioutil.Discard
+	})
+	if err != nil {
+		log.Fatal(fmt.Errorf("failed to start consul server: %v", err))
 	}
-	if vt.CanShare() {
-		t.Fatalf("should not share vault")
+	testConsul = consul
+
+	clients := NewClientSet()
+	if err := clients.CreateConsulClient(&CreateConsulClientInput{
+		Address: testConsul.HTTPAddr,
+	}); err != nil {
+		testConsul.Stop()
+		log.Fatal(err)
 	}
-	if file.CanShare() {
-		t.Fatalf("should not share file")
+	testClients = clients
+
+	serviceMetaService := &api.AgentServiceRegistration{
+		ID:   "service-meta",
+		Name: "service-meta",
+		Tags: []string{"tag1"},
+		Meta: map[string]string{
+			"meta1": "value1",
+		},
 	}
-	if !service.CanShare() {
-		t.Fatalf("should share service")
+
+	if err := testClients.consul.client.Agent().ServiceRegister(serviceMetaService); err != nil {
+		panic(err)
+	}
+
+	exitCh := make(chan int, 1)
+	func() {
+		defer func() {
+			// Attempt to recover from a panic and stop the server. If we don't stop
+			// it, the panic will cause the server to remain running in the
+			// background. Here we catch the panic and the re-raise it.
+			if r := recover(); r != nil {
+				testConsul.Stop()
+				panic(r)
+			}
+		}()
+
+		exitCh <- m.Run()
+	}()
+
+	exit := <-exitCh
+
+	testConsul.Stop()
+	os.Exit(exit)
+}
+
+func TestCanShare(t *testing.T) {
+	t.Parallel()
+
+	deps := []Dependency{
+		&CatalogNodeQuery{},
+		&FileQuery{},
+		&VaultListQuery{},
+		&VaultReadQuery{},
+		&VaultTokenQuery{},
+		&VaultWriteQuery{},
+	}
+
+	for _, d := range deps {
+		if d.CanShare() {
+			t.Errorf("should not share %s", d)
+		}
 	}
 }
 
 func TestDeepCopyAndSortTags(t *testing.T) {
+	t.Parallel()
+
 	tags := []string{"hello", "world", "these", "are", "tags"}
 	expected := []string{"are", "hello", "tags", "these", "world"}
 
@@ -45,35 +110,9 @@ func TestDeepCopyAndSortTags(t *testing.T) {
 	}
 }
 
-// testConsulServer is a helper for creating a Consul server and returning the
-// appropriate configuration to connect to it.
-func testConsulServer(t *testing.T) (*ClientSet, *testutil.TestServer) {
-	t.Parallel()
-
-	consul := testutil.NewTestServerConfig(t, func(c *testutil.TestServerConfig) {
-		c.Stdout = ioutil.Discard
-		c.Stderr = ioutil.Discard
-	})
-
-	config := consulapi.DefaultConfig()
-	config.Address = consul.HTTPAddr
-	client, err := consulapi.NewClient(config)
-	if err != nil {
-		consul.Stop()
-		t.Fatalf("consul api client err: %s", err)
-	}
-
-	clients := NewClientSet()
-	if err := clients.Add(client); err != nil {
-		consul.Stop()
-		t.Fatalf("clientset err: %s", err)
-	}
-
-	return clients, consul
-}
-
 type vaultServer struct {
-	Token string
+	Address string
+	Token   string
 
 	core *vault.Core
 	ln   net.Listener
@@ -97,24 +136,59 @@ func (s *vaultServer) CreateSecret(path string, data map[string]interface{}) err
 // testVaultServer is a helper for creating a Vault server and returning the
 // appropriate client to connect to it.
 func testVaultServer(t *testing.T) (*ClientSet, *vaultServer) {
-	core, _, token := vault.TestCoreUnsealed(t)
-	ln, addr := http.TestServer(t, core)
-
-	config := vaultapi.DefaultConfig()
-	config.Address = addr
-	client, err := vaultapi.NewClient(config)
+	inm, err := inmem.NewInmem(nil, logxi.NullLog)
 	if err != nil {
-		defer ln.Close()
 		t.Fatal(err)
 	}
 
-	client.SetToken(token)
+	core, err := vault.NewCore(&vault.CoreConfig{
+		DisableMlock:    true,
+		DisableCache:    true,
+		DefaultLeaseTTL: 2 * time.Second,
+		MaxLeaseTTL:     3 * time.Second,
+		Logger:          logxi.NullLog,
+		Physical:        inm,
+		LogicalBackends: map[string]logical.Factory{
+			"pki":     pki.Factory,
+			"transit": transit.Factory,
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
 
+	keys, token := vault.TestCoreInit(t, core)
+
+	for _, key := range keys {
+		if _, err := vault.TestCoreUnseal(core, vault.TestKeyCopy(key)); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	sealed, err := core.Sealed()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if sealed {
+		t.Fatal("vault should not be sealed")
+	}
+
+	ln, addr := http.TestServer(t, core)
 	clients := NewClientSet()
-	if err := clients.Add(client); err != nil {
-		defer ln.Close()
+	if err := clients.CreateVaultClient(&CreateVaultClientInput{
+		Address: addr,
+		Token:   token,
+	}); err != nil {
+		ln.Close()
 		t.Fatal(err)
 	}
 
-	return clients, &vaultServer{Token: token, core: core, ln: ln}
+	server := &vaultServer{
+		Address: addr,
+		Token:   token,
+		core:    core,
+		ln:      ln,
+	}
+
+	return clients, server
 }

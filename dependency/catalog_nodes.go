@@ -2,11 +2,21 @@ package dependency
 
 import (
 	"encoding/gob"
-	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"regexp"
 	"sort"
+
+	"github.com/pkg/errors"
+)
+
+var (
+	// Ensure implements
+	_ Dependency = (*CatalogNodesQuery)(nil)
+
+	// CatalogNodesQueryRe is the regular expression to use.
+	CatalogNodesQueryRe = regexp.MustCompile(`\A` + dcRe + nearRe + `\z`)
 )
 
 func init() {
@@ -15,50 +25,78 @@ func init() {
 
 // Node is a node entry in Consul
 type Node struct {
-	Node    string
-	Address string
+	ID              string
+	Node            string
+	Address         string
+	Datacenter      string
+	TaggedAddresses map[string]string
+	Meta            map[string]string
 }
 
-type CatalogNodes struct {
-	rawKey     string
-	DataCenter string
+// CatalogNodesQuery is the representation of all registered nodes in Consul.
+type CatalogNodesQuery struct {
+	stopCh chan struct{}
+
+	dc   string
+	near string
+}
+
+// NewCatalogNodesQuery parses the given string into a dependency. If the name is
+// empty then the name of the local agent is used.
+func NewCatalogNodesQuery(s string) (*CatalogNodesQuery, error) {
+	if !CatalogNodesQueryRe.MatchString(s) {
+		return nil, fmt.Errorf("catalog.nodes: invalid format: %q", s)
+	}
+
+	m := regexpMatch(CatalogNodesQueryRe, s)
+	return &CatalogNodesQuery{
+		dc:     m["dc"],
+		near:   m["near"],
+		stopCh: make(chan struct{}, 1),
+	}, nil
 }
 
 // Fetch queries the Consul API defined by the given client and returns a slice
 // of Node objects
-func (d *CatalogNodes) Fetch(clients *ClientSet, opts *QueryOptions) (interface{}, *ResponseMetadata, error) {
-	if opts == nil {
-		opts = &QueryOptions{}
+func (d *CatalogNodesQuery) Fetch(clients *ClientSet, opts *QueryOptions) (interface{}, *ResponseMetadata, error) {
+	select {
+	case <-d.stopCh:
+		return nil, nil, ErrStopped
+	default:
 	}
 
-	consulOpts := opts.consulQueryOptions()
-	if d.DataCenter != "" {
-		consulOpts.Datacenter = d.DataCenter
-	}
+	opts = opts.Merge(&QueryOptions{
+		Datacenter: d.dc,
+		Near:       d.near,
+	})
 
-	log.Printf("[DEBUG] (%s) querying Consul with %+v", d.Display(), consulOpts)
-
-	consul, err := clients.Consul()
+	log.Printf("[TRACE] %s: GET %s", d, &url.URL{
+		Path:     "/v1/catalog/nodes",
+		RawQuery: opts.String(),
+	})
+	n, qm, err := clients.Consul().Catalog().Nodes(opts.ToConsulOpts())
 	if err != nil {
-		return nil, nil, fmt.Errorf("catalog nodes: error getting client: %s", err)
+		return nil, nil, errors.Wrap(err, d.String())
 	}
 
-	catalog := consul.Catalog()
-	n, qm, err := catalog.Nodes(consulOpts)
-	if err != nil {
-		return nil, nil, fmt.Errorf("catalog nodes: error fetching: %s", err)
-	}
-
-	log.Printf("[DEBUG] (%s) Consul returned %d nodes", d.Display(), len(n))
+	log.Printf("[TRACE] %s: returned %d results", d, len(n))
 
 	nodes := make([]*Node, 0, len(n))
 	for _, node := range n {
 		nodes = append(nodes, &Node{
-			Node:    node.Node,
-			Address: node.Address,
+			ID:              node.ID,
+			Node:            node.Node,
+			Address:         node.Address,
+			Datacenter:      node.Datacenter,
+			TaggedAddresses: node.TaggedAddresses,
+			Meta:            node.Meta,
 		})
 	}
-	sort.Stable(NodeList(nodes))
+
+	// Sort unless the user explicitly asked for nearness
+	if d.near == "" {
+		sort.Stable(ByNode(nodes))
+	}
 
 	rm := &ResponseMetadata{
 		LastIndex:   qm.LastIndex,
@@ -68,66 +106,43 @@ func (d *CatalogNodes) Fetch(clients *ClientSet, opts *QueryOptions) (interface{
 	return nodes, rm, nil
 }
 
-// CanShare returns if this dependency is shareable.
-func (d *CatalogNodes) CanShare() bool {
+// CanShare returns a boolean if this dependency is shareable.
+func (d *CatalogNodesQuery) CanShare() bool {
 	return true
 }
 
-func (d *CatalogNodes) HashCode() string {
-	return fmt.Sprintf("CatalogNodes|%s", d.rawKey)
-}
-
-func (d *CatalogNodes) Display() string {
-	if d.rawKey == "" {
-		return fmt.Sprintf(`"nodes"`)
+// String returns the human-friendly version of this dependency.
+func (d *CatalogNodesQuery) String() string {
+	name := ""
+	if d.dc != "" {
+		name = name + "@" + d.dc
+	}
+	if d.near != "" {
+		name = name + "~" + d.near
 	}
 
-	return fmt.Sprintf(`"nodes(%s)"`, d.rawKey)
-}
-
-// ParseCatalogNodes parses a string of the format @dc.
-func ParseCatalogNodes(s ...string) (*CatalogNodes, error) {
-	switch len(s) {
-	case 0:
-		return &CatalogNodes{rawKey: ""}, nil
-	case 1:
-		dc := s[0]
-
-		re := regexp.MustCompile(`\A` +
-			`(@(?P<datacenter>[[:word:]\.\-]+))?` +
-			`\z`)
-		names := re.SubexpNames()
-		match := re.FindAllStringSubmatch(dc, -1)
-
-		if len(match) == 0 {
-			return nil, errors.New("invalid node dependency format")
-		}
-
-		r := match[0]
-
-		m := map[string]string{}
-		for i, n := range r {
-			if names[i] != "" {
-				m[names[i]] = n
-			}
-		}
-
-		nd := &CatalogNodes{
-			rawKey:     dc,
-			DataCenter: m["datacenter"],
-		}
-
-		return nd, nil
-	default:
-		return nil, fmt.Errorf("expected 0 or 1 arguments, got %d", len(s))
+	if name == "" {
+		return "catalog.nodes"
 	}
+	return fmt.Sprintf("catalog.nodes(%s)", name)
 }
 
-type NodeList []*Node
+// Stop halts the dependency's fetch function.
+func (d *CatalogNodesQuery) Stop() {
+	close(d.stopCh)
+}
 
-func (s NodeList) Len() int      { return len(s) }
-func (s NodeList) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
-func (s NodeList) Less(i, j int) bool {
+// Type returns the type of this dependency.
+func (d *CatalogNodesQuery) Type() Type {
+	return TypeConsul
+}
+
+// ByNode is a sortable list of nodes by name and then IP address.
+type ByNode []*Node
+
+func (s ByNode) Len() int      { return len(s) }
+func (s ByNode) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s ByNode) Less(i, j int) bool {
 	if s[i].Node == s[j].Node {
 		return s[i].Address <= s[j].Address
 	}

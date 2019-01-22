@@ -1,33 +1,79 @@
 package dependency
 
 import (
+	"fmt"
 	"testing"
 
 	"github.com/hashicorp/vault/api"
+	"github.com/stretchr/testify/assert"
 )
 
-func TestVaultTokenFetch(t *testing.T) {
-	clients, server := testVaultServer(t)
-	defer server.Stop()
+func TestNewVaultTokenQuery(t *testing.T) {
+	t.Parallel()
 
-	// Create a new token - the default token is a root token and is therefore
-	// not renewable
-	secret, err := clients.vault.Auth().Token().Create(&api.TokenCreateRequest{
-		Lease: "1h",
-	})
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name string
+		exp  *VaultTokenQuery
+		err  bool
+	}{
+		{
+			"default",
+			&VaultTokenQuery{
+				secret: &Secret{
+					Auth: &SecretAuth{
+						ClientToken:   "my-token",
+						Renewable:     true,
+						LeaseDuration: 1,
+					},
+				},
+				vaultSecret: &api.Secret{
+					Auth: &api.SecretAuth{
+						ClientToken:   "my-token",
+						Renewable:     true,
+						LeaseDuration: 1,
+					},
+				},
+			},
+			false,
+		},
 	}
-	clients.vault.SetToken(secret.Auth.ClientToken)
 
-	dep := new(VaultToken)
-	results, _, err := dep.Fetch(clients, nil)
-	if err != nil {
-		t.Fatal(err)
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", i, tc.name), func(t *testing.T) {
+			act, err := NewVaultTokenQuery("my-token")
+			if (err != nil) != tc.err {
+				t.Fatal(err)
+			}
+
+			if act != nil {
+				act.stopCh = nil
+			}
+
+			assert.Equal(t, tc.exp, act)
+		})
+	}
+}
+
+func TestVaultTokenQuery_String(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		exp  string
+	}{
+		{
+			"default",
+			"vault.token",
+		},
 	}
 
-	_, ok := results.(*Secret)
-	if !ok {
-		t.Fatal("could not convert result to a *vault/api.Secret")
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", i, tc.name), func(t *testing.T) {
+			d, err := NewVaultTokenQuery("my-token")
+			if err != nil {
+				t.Fatal(err)
+			}
+			assert.Equal(t, tc.exp, d.String())
+		})
 	}
 }

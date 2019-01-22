@@ -1,14 +1,26 @@
+dist: trusty
 sudo: false
 
 language: go
 
 go:
-  - 1.5.1
+  - 1.10.1
+
+env:
+  - GOMAXPROCS=4
 
 branches:
   only:
     - master
 
-script:
-  - make updatedeps
-  - make test testrace
+env:
+  - CONSUL_VERSION=1.2.0
+
+before_install:
+  - curl -sLo consul.zip https://releases.hashicorp.com/consul/${CONSUL_VERSION}/consul_${CONSUL_VERSION}_linux_amd64.zip
+  - unzip consul.zip
+  - mkdir -p ~/bin
+  - mv consul ~/bin
+  - export PATH="~/bin:$PATH"
+
+script: make test

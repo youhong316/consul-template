@@ -2,69 +2,88 @@ package dependency
 
 import (
 	"encoding/gob"
-	"errors"
 	"fmt"
 	"log"
+	"net/url"
 	"regexp"
 	"sort"
+
+	"github.com/pkg/errors"
+)
+
+var (
+	// Ensure implements
+	_ Dependency = (*CatalogServicesQuery)(nil)
+
+	// CatalogServicesQueryRe is the regular expression to use for CatalogNodesQuery.
+	CatalogServicesQueryRe = regexp.MustCompile(`\A` + dcRe + `\z`)
 )
 
 func init() {
-	gob.Register([]*CatalogService{})
+	gob.Register([]*CatalogSnippet{})
 }
 
-// CatalogService is a catalog entry in Consul.
-type CatalogService struct {
+// CatalogSnippet is a catalog entry in Consul.
+type CatalogSnippet struct {
 	Name string
 	Tags ServiceTags
 }
 
-// CatalogServices is the representation of a requested catalog service
+// CatalogServicesQuery is the representation of a requested catalog service
 // dependency from inside a template.
-type CatalogServices struct {
-	rawKey     string
-	Name       string
-	Tags       []string
-	DataCenter string
+type CatalogServicesQuery struct {
+	stopCh chan struct{}
+
+	dc string
+}
+
+// NewCatalogServicesQuery parses a string of the format @dc.
+func NewCatalogServicesQuery(s string) (*CatalogServicesQuery, error) {
+	if !CatalogServicesQueryRe.MatchString(s) {
+		return nil, fmt.Errorf("catalog.services: invalid format: %q", s)
+	}
+
+	m := regexpMatch(CatalogServicesQueryRe, s)
+	return &CatalogServicesQuery{
+		stopCh: make(chan struct{}, 1),
+		dc:     m["dc"],
+	}, nil
 }
 
 // Fetch queries the Consul API defined by the given client and returns a slice
 // of CatalogService objects.
-func (d *CatalogServices) Fetch(clients *ClientSet, opts *QueryOptions) (interface{}, *ResponseMetadata, error) {
-	if opts == nil {
-		opts = &QueryOptions{}
+func (d *CatalogServicesQuery) Fetch(clients *ClientSet, opts *QueryOptions) (interface{}, *ResponseMetadata, error) {
+	select {
+	case <-d.stopCh:
+		return nil, nil, ErrStopped
+	default:
 	}
 
-	consulOpts := opts.consulQueryOptions()
-	if d.DataCenter != "" {
-		consulOpts.Datacenter = d.DataCenter
-	}
+	opts = opts.Merge(&QueryOptions{
+		Datacenter: d.dc,
+	})
 
-	log.Printf("[DEBUG] (%s) querying Consul with %+v", d.Display(), consulOpts)
+	log.Printf("[TRACE] %s: GET %s", d, &url.URL{
+		Path:     "/v1/catalog/services",
+		RawQuery: opts.String(),
+	})
 
-	consul, err := clients.Consul()
+	entries, qm, err := clients.Consul().Catalog().Services(opts.ToConsulOpts())
 	if err != nil {
-		return nil, nil, fmt.Errorf("catalog services: error getting client: %s", err)
+		return nil, nil, errors.Wrap(err, d.String())
 	}
 
-	catalog := consul.Catalog()
-	entries, qm, err := catalog.Services(consulOpts)
-	if err != nil {
-		return nil, nil, fmt.Errorf("catalog services: error fetching: %s", err)
-	}
+	log.Printf("[TRACE] %s: returned %d results", d, len(entries))
 
-	log.Printf("[DEBUG] (%s) Consul returned %d catalog services", d.Display(), len(entries))
-
-	var catalogServices []*CatalogService
+	var catalogServices []*CatalogSnippet
 	for name, tags := range entries {
-		tags = deepCopyAndSortTags(tags)
-		catalogServices = append(catalogServices, &CatalogService{
+		catalogServices = append(catalogServices, &CatalogSnippet{
 			Name: name,
-			Tags: ServiceTags(tags),
+			Tags: ServiceTags(deepCopyAndSortTags(tags)),
 		})
 	}
 
-	sort.Stable(CatalogServicesList(catalogServices))
+	sort.Stable(ByName(catalogServices))
 
 	rm := &ResponseMetadata{
 		LastIndex:   qm.LastIndex,
@@ -74,72 +93,35 @@ func (d *CatalogServices) Fetch(clients *ClientSet, opts *QueryOptions) (interfa
 	return catalogServices, rm, nil
 }
 
-// CanShare returns if this dependency is shareable.
-func (d *CatalogServices) CanShare() bool {
+// CanShare returns a boolean if this dependency is shareable.
+func (d *CatalogServicesQuery) CanShare() bool {
 	return true
 }
 
-// HashCode returns the hash code for this dependency.
-func (d *CatalogServices) HashCode() string {
-	return fmt.Sprintf("CatalogServices|%s", d.rawKey)
-}
-
-// Display returns a string that should be displayed to the user in output (for
-// example).
-func (d *CatalogServices) Display() string {
-	if d.rawKey == "" {
-		return fmt.Sprintf(`"services"`)
+// String returns the human-friendly version of this dependency.
+func (d *CatalogServicesQuery) String() string {
+	if d.dc != "" {
+		return fmt.Sprintf("catalog.services(@%s)", d.dc)
 	}
-
-	return fmt.Sprintf(`"services(%s)"`, d.rawKey)
+	return "catalog.services"
 }
 
-// ParseCatalogServices parses a string of the format @dc.
-func ParseCatalogServices(s ...string) (*CatalogServices, error) {
-	switch len(s) {
-	case 0:
-		return &CatalogServices{rawKey: ""}, nil
-	case 1:
-		dc := s[0]
-
-		re := regexp.MustCompile(`\A` +
-			`(@(?P<datacenter>[[:word:]\.\-]+))?` +
-			`\z`)
-		names := re.SubexpNames()
-		match := re.FindAllStringSubmatch(dc, -1)
-
-		if len(match) == 0 {
-			return nil, errors.New("invalid catalog service dependency format")
-		}
-
-		r := match[0]
-
-		m := map[string]string{}
-		for i, n := range r {
-			if names[i] != "" {
-				m[names[i]] = n
-			}
-		}
-
-		nd := &CatalogServices{
-			rawKey:     dc,
-			DataCenter: m["datacenter"],
-		}
-
-		return nd, nil
-	default:
-		return nil, fmt.Errorf("expected 0 or 1 arguments, got %d", len(s))
-	}
+// Stop halts the dependency's fetch function.
+func (d *CatalogServicesQuery) Stop() {
+	close(d.stopCh)
 }
 
-/// --- Sorting
+// Type returns the type of this dependency.
+func (d *CatalogServicesQuery) Type() Type {
+	return TypeConsul
+}
 
-// CatalogServicesList is a sortable slice of CatalogService structs.
-type CatalogServicesList []*CatalogService
+// ByName is a sortable slice of CatalogService structs.
+type ByName []*CatalogSnippet
 
-func (s CatalogServicesList) Len() int      { return len(s) }
-func (s CatalogServicesList) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
-func (s CatalogServicesList) Less(i, j int) bool {
+func (s ByName) Len() int      { return len(s) }
+func (s ByName) Swap(i, j int) { s[i], s[j] = s[j], s[i] }
+func (s ByName) Less(i, j int) bool {
 	if s[i].Name <= s[j].Name {
 		return true
 	}

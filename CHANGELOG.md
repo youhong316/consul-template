@@ -1,7 +1,477 @@
-Consul Template Changelog
-=========================
+# Consul Template CHANGELOG
 
-## v0.13.0 (Unreleased)
+## v0.19.5 (June 12, 2018)
+
+BUG FIXES:
+  * The de-duplication feature was incorrectly calculating the hash of dependency 
+    values over an unstable encoding of the data. This meant that in most cases 
+    the templates were being re-written to KV and on all watching template 
+    instances every minimum update time (i.e. `wait { min = X }`). At best this
+    was a lot of wasted work, in some cases it caused 100% CPU usage when template 
+    instance leadership was split. [GH-1099, GH-1095]
+  * Fixed an issue where we waited unnecessarily for a child process to exit [GH-1101]
+
+IMPROVEMENTS:
+
+  * Initiating runner log level moved to DEBUG [GH-1088]
+
+
+## v0.19.4 (October 30, 2017)
+
+BREAKING CHANGES:
+
+  * The version of Consul Template is now taken into account when using
+    de-duplication mode. Without bundling the version, it's challenging to
+    upgrade existing clusters or run multiple versions of Consul Template on the
+    same cluster and template simultaneously. [GH-1025]
+
+BUG FIXES:
+
+  * Remove references to unsupported `dump_signal` configuration
+
+  * Update vendor libraries to support Consul 1.0.0 changes for better test
+    stability
+
+  * Renew unwrapped Vault token (previously Consul Template) would try to renew
+    the wrapped token, which would not work.
+
+  * Do not sort results when `~near` queries are used [GH-1027]
+
+  * Handle integer overflow in exponential backoff calculations
+    [GH-1031, GH-1028]
+
+  * Properly preserve existing file permissions [GH-1037]
+
+IMPROVEMENTS:
+
+  * Compile with Go 1.9.2
+
+  * The Vault grace period in the config is now set to 15 seconds as the
+    default. This matches Vault's default configuration for consistency.
+
+  * Add `indent` function for indenting blocks of text in templates
+
+  * Allow additional colons in the template command on the CLI [GH-1026]
+
+  * Add Vault Transit example for key exfiltration [GH-1014]
+
+  * Add a new option for disabling recursive directory creation per template
+    [GH-1033]
+
+  * Allow dots in node names [GH-977]
+
+## v0.19.3 (September 11, 2017)
+
+BUG FIXES:
+
+  * Fix a bug that would cause once mode to not exit when the file pre-existed
+    on disk with the correct contents. [GH-1000]
+
+## v0.19.2 (September 1, 2017)
+
+BUG FIXES:
+
+  * Fix a critical bug that would cause a hot loop for some TTL durations.
+      [GH-1004]
+
+## v0.19.1 (August 25, 2017)
+
+IMPROVEMENTS:
+
+  * The runner's render event now includes the last-rendered template contents.
+      This is useful when embedding Consul Template as a library. [GH-974-975]
+
+  * Use the new Golang API renewer [GH-978]
+
+  * Compile and build with Go 1.9
+
+BUG FIXES:
+
+  * Add per-template option `error_on_missing_key`. This causes the template to
+      error when the user attempts to access a key in a map or field in a struct
+      that does not exist. Previous behavior was to print `<no value>`, which
+      might not be the desired behavior. This is opt-in behavior on a
+      per-template basis. There is no global option. A future version of
+      Consul Template will switch the default behavior to this safer format, but
+      that change will be clearly called out as a breaking change in the future.
+      Users should set `error_on_missing_key = false` in their configuration
+      files if they are relying on the current `<no value>` behavior.
+      [GH-973, GH-972]
+  * Ensure all templates are rendered before spawning commands [GH-991, GH-995]
+
+## v0.19.0 (June 29, 2017)
+
+BREAKING CHANGES:
+
+  * All previous deprecation errors have been removed and associated configs or
+      CLI options are no longer valid. It is highly recommended that you run
+      v0.18.5 and resolve any deprecations before upgrading to this version!
+
+IMPROVEMENTS:
+
+  * Add new configuration option `vault.grace`, which configures the grace
+      period between lease renewal and secret re-acquisition. When renewing a
+      secret, if the remaining lease is less than or equal to the configured
+      grace, Consul Template will request a new credential. This prevents Vault
+      from revoking the credential at expiration and Consul Template having a
+      stale credential. **If you set this to a value that is higher than your
+      default TTL or max TTL, Consul Template will always read a new secret!**
+  * Add a new option to `datacenters` to optionally ignore inaccessible
+      datacenters [GH-908].
+
+BUG FIXES:
+
+  * Use the logger as soon as its available for output [GH-947]
+  * Update Consul API library to fix a bug where custom CA configuration was
+      ignored [GH-965]
+
+
+## v0.18.5 (May 25, 2017)
+
+BREAKING CHANGES:
+
+  * Retry now has a sane maximum default. Previous versions of Consul Template
+      would retry indefinitely, potentially allowing the time between retries to
+      reach days, months, or years due to the exponential nature. Users wishing
+      to use the old behavior should set `max_backoff = 0` in their
+      configurations. [GH-940]
+
+IMPROVEMENTS:
+
+  * Add support for `MaxBackoff` in Retry options [GH-938, GH-939]
+  * Compile with Go 1.8.3
+
+## v0.18.4 (May 25, 2017)
+
+BUG FIXES:
+
+  * Compile with go 1.8.2 for the security fix. The code is exactly the same as
+      v0.18.3.
+
+## v0.18.3 (May 9, 2017)
+
+IMPROVEMENTS:
+
+  * Add support for local datacenter in node queries [GH-862, GH-927]
+  * Add support for service tags on health checks [Consul vendor update]
+
+BUG FIXES:
+
+  * Seed the random generator for splay values  
+  * Reset retries counter on successful contact [GH-931]
+  * Return a nil slice instead of an error for non-existent maps
+      [GH-906, GH-932]
+  * Do not return data in dedup mode if the template is unchanged
+      [GH-933 GH-698]
+
+NOTABLE:
+
+  * Consul Template is now built with Go 1.8.1
+  * Update internal library to Consul 0.8.2 - this should not affect any users
+
+## v0.18.2 (March 28, 2017)
+
+IMPROVEMENTS:
+
+  * Add missing HTTP transport configuration options
+  * Add `modulo` function for performing modulo math
+
+BUG FIXES:
+
+  * Default transport max idle connections based on `GOMAXPROCS`
+  * Read `VAULT_*` envvars before finalizing [GH-914, GH-916]
+  * Register `[]*KeyPair` as a gob [GH-893]
+
+## v0.18.1 (February 7, 2017)
+
+IMPROVEMENTS:
+
+  * Add support for tagged addresses and metadata [GH-863]
+  * Add `.exe` extension to Windows binaries [GH-875]
+  * Add support for customizing the low-level transport details for Consul and
+      Vault [GH-880, GH-877]
+  * Read token from `~/.vault-token` if it exists [GH-878, GH-884]
+
+BUG FIXES:
+
+  * Resolve an issue with filters on health service dependencies [GH-857]
+  * Restore ability to reload configurations from disk [GH-866]
+  * Move `env` back to a helper function [GH-882]
+
+    This was causing a lot of issues for users, and it required many folks to
+    re-write their templates for the small benefit of people running in
+    de-duplicate mode who did not understand the trade-offs. The README is now
+    updated with the trade-offs of running in dedup mode and the expected `env`
+    behavior has been restored.
+
+  * Do not loop indefinitely if the dedup manager is unable to acquire a lock
+      [GH-864]
+
+
+## v0.18.0 (January 20, 2017)
+
+NEW FEATURES:
+
+  * Add new template function `keyExists` for determining if a key is present.
+      See the breaking change notice before for more information about the
+      motivation for this change.
+
+  * Add `scratch` for storing information across a template invocation. Scratch
+      is especially useful when saving a computed value to use it across a
+      template. Scratch values are not shared across multiple templates and are
+      not persisted between template invocations
+
+  * Add support for controlling retry behavior for failed communications to
+      Consul or Vault. By default, Consul Template will now retry 5 times before
+      returning an error. The backoff timing and number of attempts can be tuned
+      using the CLI or a configuration file.
+
+  * Add `executeTemplate` function for executing a defined template.
+
+  * Add `base64Decode`, `base64Encode`, `base64URLDecode`, and `base64URLEncode`
+      functions for working with base64 encodings.
+
+  * Add `containsAll`, `containsAny`, `containsNone`, and `containsNotAll`
+      functions for easy filtering of multiple tag selections.
+
+BREAKING CHANGES:
+
+  * Consul Template now **blocks on `key` queries**. The previous behavior was
+      to always pass through, allowing users to use the existence of a key as
+      a source of control flow. This caused confusion among many users, so we
+      have restored the expected behavior of blocking on a `key` query, but have
+      added `keyExists` to check for the existence of a key. Note that the
+      `keyOrDefault` function remains unchanged and will not block if the value
+      is nil, as expected.
+
+  * The `vault` template function has been removed. This has been deprecated
+      with a warning since v0.14.0.
+
+  * A shell is no longer assumed for Template commands. Previous versions of
+      Consul Template assumed `/bin/sh` (`cmd` on Windows) as the parent
+      process for the template command. Due to user requests and a desire to
+      customize the shell, Consul Template no longer wraps the command in a
+      shell. For most commands, this change will be transparent. If you were
+      utilizing shell-specific functions like `&&`, `||`, or conditionals, you
+      will need to wrap you command in a shell, for example:
+
+    ```shell
+    -template "in.tpl:out.tpl:/bin/bash -c 'echo a || b'"
+    ```
+
+    or
+
+    ```hcl
+    template {
+      command = "/bin/bash -c 'echo a || b'"
+    }
+    ```
+
+  * The `env` function is now treated as a dependency instead of a helper. For
+      most users, there will be no impact.
+
+  * This release is compiled with Golang v1.8. We do not expect this to cause
+      any issues, but it is worth calling out.
+
+DEPRECATIONS:
+
+  * `.Tags.Contains` is deprecated. Templates should make use of the built-in
+      `in` and `contains` functions instead. For example:
+
+    ```liquid
+    {{ if .Tags.Contains "foo" }}
+    ```
+
+    becomes:
+
+    ```liquid
+    {{ if .Tags | contains "foo" }}
+    ```
+
+    or:
+
+    ```liquid
+    {{ if "foo" | in .Tags }}
+    ```
+
+  * `key_or_default` has been renamed to `keyOrDefault` to better align with
+      Go's naming structure. The old method is aliased and will remain until a
+      future release.
+
+  * Consul-specific CLI options are now prefixed with `-consul-`:
+
+    * `-auth` is now `-consul-auth`
+    * `-ssl-(.*)` is now `-consul-ssl-$1`
+    * `-retry` is now `-consul-retry` and has been broken apart into more
+      specific CLI options.
+
+  * Consul-specific configuration options are now nested under a stanza. For
+    example:
+
+    ```hcl
+    auth {
+      username = "foo"
+      password = "bar"
+    }
+    ```
+
+    becomes:
+
+    ```hcl
+    consul {
+      auth {
+        username = "foo"
+        password = "bar"
+      }
+    }
+    ```
+
+    This applies to the `auth`, `retry`, `ssl`, and `token` options.
+
+IMPROVEMENTS:
+
+  * Add CLI support for all SSL configuration options for both Consul and Vault.
+    Vault options are identical to Consul but with `vault-` prefix. Includes
+    the addition of `ssl-ca-path` to be consistent with file-based configuration
+    options.
+
+    * `ssl` `vault-ssl` (Enable)
+    * `ssl-verify` `vault-ssl-verify`
+    * `ssl-cert` `vault-ssl-cert`
+    * `ssl-key` `vault-ssl-key`
+    * `ssl-ca-cert` `vault-ssl-ca-cert`
+    * `ssl-ca-path` `vault-ssl-ca-path`
+    * `ssl-server-name` `vault-ssl-server-name`
+
+  * Add `-consul-ssl-server-name`
+  * Add `-consul-ssl-ca-path`
+  * Add `-consul-retry`
+  * Add `-consul-retry-attempts`
+  * Add `-consul-retry-backoff`
+  * Add `-vault-retry`
+  * Add `-vault-retry-attempts`
+  * Add `-vault-retry-backoff`
+  * Add support for `server_name` option for TLS configurations to allow
+      specification of the expected certificate common name.
+  * Add `-vault-addr` CLI option for specifying the Vault server address
+      [GH-740, GH-747]
+  * Add tagged addresses to Node structs
+  * Add support for multiple `-config` flags [GH-773, GH-751]
+  * Add more control over template command execution
+  * Add a way to programatically track the dependencies a particular template
+      is blocked on [GH-799]
+
+BUG FIXES:
+
+  * Fix `-renew-token` flag not begin honored on the CLI [GH-741, GH-745]
+  * Allow `*` in key names [GH-789, GH-755]
+
+## v0.16.0 (September 22, 2016)
+
+NEW FEATURES:
+
+  * **Exec Mode!** Consul Template can now act as a faux-supervisor for
+      applications. Please see the [Exec Mode](README.md#exec-mode)
+      documentation for more information.
+  * **Vault Token Unwrapping!** Consul Template can now unwrap Vault tokens that
+      have been wrapped using Vault's cubbyhole response wrapping. Simply add
+      the `unwrap_token` option to your Vault configuration stanza or pass in
+      the `-vault-unwrap-token` command line flag.
+
+BREAKING CHANGES:
+
+  * Consul Template no longer terminates on SIGTERM or SIGQUIT. Previous
+      versions were hard-coded to listen for SIGINT, SIGTERM, and SIGQUIT. This
+      value is now configurable, and the default is SIGINT. SIGQUIT will trigger
+      a core dump in accordance with similar programs. SIGTERM is no longer
+      listened.
+  * Consul Template now exits on irrecoverable Vault errors such as failing to
+      renew a token or lease.
+
+DEPRECATIONS:
+
+  * The `vault.renew` option has been renamed to `vault.renew_token` for added
+      clarity. This is backwards-compatible for this release, but will be
+      removed in a future release, so please update your configurations
+      accordingly.
+
+IMPROVEMENTS:
+
+  * Permit commas in key prefix names [GH-669]
+  * Add configurable kill and reload signals [GH-686]
+  * Add a command line flag for controlling whether a provided Vault token will
+      be renewed [GH-718]
+
+BUG FIXES:
+
+  * Allow variadic template function for `secret` [GH-660, GH-662]
+  * Always log in UTC time
+  * Log milliseconds [GH-676, GH-674]
+  * Maintain template ordering [GH-683]
+  * Add `Service` address to catalog node response [GH-687]
+  * Do not require trailing slashes [GH-706, GH-713]
+  * Wait for all existing dedup acquire attempts to finish [GH-716, GH-677]
+
+
+## v0.15.0.dev (June 9, 2016)
+
+BREAKING CHANGES:
+
+  * **Removing reaping functionality** [GH-628]
+
+IMPROVEMENTS:
+
+  * Allow specifying per-template delimiters [GH-615, GH-389]
+  * Allow specifying per-template wait parameters [GH-589, GH-618]
+  * Switch to actually vendoring dependencies
+  * Add support for writing data [GH-652, GH-492]
+
+BUG FIXES:
+
+  * Close open connections when reloading configuration [GH-591, GH-595]
+  * Do not share catalog nodes [GH-611, GH-572, GH-603]
+  * Properly handle empty string in ParseUint [GH-610, GH-609]
+  * Cache Vault's _original_ lease duration [5b955a8]
+  * Use decimal division for calculating Vault lease durations [87d61d9]
+  * Load VAULT_TOKEN environment variable [2431448]
+  * Properly clean up quiescence timers when using multiple templates [GH-616]
+  * Print a nice error if K/V cannot be exploded [GH-617, GH-596]
+  * Update documentation about symlinks [GH-579]
+  * Properly parse file permissions in mapstructure [GH-626]
+
+## v0.14.0 (March 7, 2016)
+
+DEPRECATIONS:
+
+  * The `vault` template API function has been renamed to `secret` to be in line
+    with other tooling. The `vault` API function will continue to work but will
+    print a warning to the log file. A future release of Consul Template will
+    remove the `vault` API.
+
+NEW FEATURES:
+
+  * Add `secrets` template API for listing secrets in Vault. Please note this
+    requires Vault 0.5+ and the secret backend must support listing. Please see
+    the Vault documentation for more information [GH-270]
+
+IMPROVEMENTS:
+
+  * Allow passing any kind of object to `toJSON` in the template. Previously
+    this was restricted to key-value maps, but that restriction is now removed.
+    [GH-553]
+
+BUG FIXES:
+
+  * Parse file permissions as a string in JSON [GH-548]
+  * Document how to reload config with signals [GH-522]
+  * Stop all dependencies when reloading the running/watcher [GH-534, GH-568]
+
+## v0.13.0 (February 18, 2016)
+
+BUG FIXES:
+
+  * Compile with go1.6 to avoid race [GH-442]
+  * Switch to using a pooled transport [GH-546]
 
 ## v0.12.2 (January 15, 2016)
 

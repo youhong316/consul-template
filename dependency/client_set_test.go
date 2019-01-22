@@ -1,133 +1,55 @@
 package dependency
 
 import (
-	"reflect"
 	"testing"
 
-	consulapi "github.com/hashicorp/consul/api"
-	vaultapi "github.com/hashicorp/vault/api"
+	"github.com/hashicorp/vault/api"
 )
 
-func TestNewClientSet(t *testing.T) {
-	clients := NewClientSet()
+func TestClientSet_unwrapVaultToken(t *testing.T) {
+	t.Parallel()
 
-	if clients.consul != nil {
-		t.Errorf("expected %#v to be nil", clients.consul)
-	}
+	clients, server := testVaultServer(t)
+	defer server.Stop()
 
-	if clients.vault != nil {
-		t.Errorf("expected %#v to be nil", clients.vault)
-	}
-}
+	vault := clients.vault.client
 
-func TestAdd_consulClient(t *testing.T) {
-	clients := NewClientSet()
-
-	consul := &consulapi.Client{}
-	if err := clients.Add(consul); err != nil {
-		t.Fatal(err)
-	}
-
-	if !reflect.DeepEqual(clients.consul, consul) {
-		t.Errorf("expected %#v to be %#v", clients.consul, consul)
-	}
-}
-
-func TestAdd_consulClientExists(t *testing.T) {
-	clients := &ClientSet{consul: &consulapi.Client{}}
-
-	consul := &consulapi.Client{}
-	err := clients.Add(consul)
-	if err == nil {
-		t.Fatal("expected error, but nothing was returned")
-	}
-
-	expected := "a consul client already exists"
-	if err.Error() != expected {
-		t.Errorf("expected %q to be %q", err.Error(), expected)
-	}
-}
-
-func TestAdd_vaultClient(t *testing.T) {
-	clients := NewClientSet()
-
-	vault := &vaultapi.Client{}
-	if err := clients.Add(vault); err != nil {
-		t.Fatal(err)
-	}
-
-	if !reflect.DeepEqual(clients.vault, vault) {
-		t.Errorf("expected %#v to be %#v", clients.vault, vault)
-	}
-}
-
-func TestAdd_vaultClientExists(t *testing.T) {
-	clients := &ClientSet{vault: &vaultapi.Client{}}
-
-	vault := &vaultapi.Client{}
-	err := clients.Add(vault)
-	if err == nil {
-		t.Fatal("expected error, but nothing was returned")
-	}
-
-	expected := "a vault client already exists"
-	if err.Error() != expected {
-		t.Errorf("expected %q to be %q", err.Error(), expected)
-	}
-}
-
-func TestConsul_exists(t *testing.T) {
-	consul := &consulapi.Client{}
-	clients := &ClientSet{consul: consul}
-
-	back, err := clients.Consul()
+	// Grab the original token
+	originalToken, err := vault.Auth().Token().LookupSelf()
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !reflect.DeepEqual(back, consul) {
-		t.Errorf("expected %#v to be %#v", back, consul)
-	}
-}
-
-func TestConsul_missing(t *testing.T) {
-	clients := NewClientSet()
-
-	_, err := clients.Consul()
-	if err == nil {
-		t.Fatal("expected error, but nothing was returned")
-	}
-
-	expected := "clientset: missing consul client"
-	if err.Error() != expected {
-		t.Errorf("expected %q to be %q", err.Error(), expected)
-	}
-}
-
-func TestVault_exists(t *testing.T) {
-	vault := &vaultapi.Client{}
-	clients := &ClientSet{vault: vault}
-
-	back, err := clients.Vault()
+	// Create a wrapped token
+	vault.SetWrappingLookupFunc(func(operation, path string) string {
+		return "30s"
+	})
+	wrappedToken, err := vault.Auth().Token().Create(&api.TokenCreateRequest{
+		Lease: "1h",
+	})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if !reflect.DeepEqual(back, vault) {
-		t.Errorf("expected %#v to be %#v", back, vault)
-	}
-}
-
-func TestVault_missing(t *testing.T) {
-	clients := NewClientSet()
-
-	_, err := clients.Vault()
-	if err == nil {
-		t.Fatal("expected error, but nothing was returned")
+	if err := clients.CreateVaultClient(&CreateVaultClientInput{
+		Address:     server.Address,
+		Token:       wrappedToken.WrapInfo.Token,
+		UnwrapToken: true,
+	}); err != nil {
+		t.Fatal(err)
 	}
 
-	expected := "clientset: missing vault client"
-	if err.Error() != expected {
-		t.Errorf("expected %q to be %q", err.Error(), expected)
+	newToken := clients.vault.client.Token()
+
+	if newToken == originalToken.Data["id"] {
+		t.Errorf("expected %q to not be %q", newToken, originalToken.Data["id"])
+	}
+
+	if newToken == wrappedToken.WrapInfo.Token {
+		t.Errorf("expected %q to not be %q", newToken, wrappedToken.WrapInfo.Token)
+	}
+
+	if _, err := vault.Auth().Token().LookupSelf(); err != nil {
+		t.Fatal(err)
 	}
 }

@@ -1,63 +1,127 @@
 package dependency
 
 import (
-	"reflect"
+	"fmt"
 	"testing"
+
+	"github.com/stretchr/testify/assert"
 )
 
-func TestCatalogServicesFetch(t *testing.T) {
-	clients, consul := testConsulServer(t)
-	defer consul.Stop()
+func TestNewCatalogServicesQuery(t *testing.T) {
+	t.Parallel()
 
-	consul.AddService("redis", "passing", []string{"master"})
-
-	dep := &CatalogServices{rawKey: "redis"}
-	results, _, err := dep.Fetch(clients, nil)
-	if err != nil {
-		t.Fatal(err)
+	cases := []struct {
+		name string
+		i    string
+		exp  *CatalogServicesQuery
+		err  bool
+	}{
+		{
+			"empty",
+			"",
+			&CatalogServicesQuery{},
+			false,
+		},
+		{
+			"node",
+			"node",
+			nil,
+			true,
+		},
+		{
+			"dc",
+			"@dc1",
+			&CatalogServicesQuery{
+				dc: "dc1",
+			},
+			false,
+		},
 	}
 
-	typed, ok := results.([]*CatalogService)
-	if !ok {
-		t.Fatal("could not convert result to []*CatalogService")
-	}
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", i, tc.name), func(t *testing.T) {
+			act, err := NewCatalogServicesQuery(tc.i)
+			if (err != nil) != tc.err {
+				t.Fatal(err)
+			}
 
-	if typed[1].Name != "redis" {
-		t.Errorf("expected %q to be %q", typed[1].Name, "redis")
+			if act != nil {
+				act.stopCh = nil
+			}
+
+			assert.Equal(t, tc.exp, act)
+		})
 	}
 }
 
-func TestCatalogServicesHashCode_isUnique(t *testing.T) {
-	dep1 := &CatalogServices{rawKey: ""}
-	dep2 := &CatalogServices{rawKey: "@nyc1"}
-	if dep1.HashCode() == dep2.HashCode() {
-		t.Errorf("expected HashCode to be unique")
+func TestCatalogServicesQuery_Fetch(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		i    string
+		exp  []*CatalogSnippet
+	}{
+		{
+			"all",
+			"",
+			[]*CatalogSnippet{
+				&CatalogSnippet{
+					Name: "consul",
+					Tags: ServiceTags([]string{}),
+				},
+				&CatalogSnippet{
+					Name: "service-meta",
+					Tags: ServiceTags([]string{"tag1"}),
+				},
+			},
+		},
+	}
+
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", i, tc.name), func(t *testing.T) {
+			d, err := NewCatalogServicesQuery(tc.i)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			act, _, err := d.Fetch(testClients, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			assert.Equal(t, tc.exp, act)
+		})
 	}
 }
 
-func TestParseCatalogServices_emptyString(t *testing.T) {
-	nd, err := ParseCatalogServices("")
-	if err != nil {
-		t.Fatal(err)
+func TestCatalogServicesQuery_String(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name string
+		i    string
+		exp  string
+	}{
+		{
+			"empty",
+			"",
+			"catalog.services",
+		},
+		{
+			"datacenter",
+			"@dc1",
+			"catalog.services(@dc1)",
+		},
 	}
 
-	expected := &CatalogServices{}
-	if !reflect.DeepEqual(nd, expected) {
-		t.Errorf("expected %+v to equal %+v", nd, expected)
-	}
-}
-
-func TestParseCatalogServices_dataCenter(t *testing.T) {
-	nd, err := ParseCatalogServices("@nyc1")
-	if err != nil {
-		t.Fatal(err)
-	}
-
-	expected := &CatalogServices{
-		rawKey:     "@nyc1",
-		DataCenter: "nyc1",
-	}
-	if !reflect.DeepEqual(nd, expected) {
-		t.Errorf("expected %+v to equal %+v", nd, expected)
+	for i, tc := range cases {
+		t.Run(fmt.Sprintf("%d_%s", i, tc.name), func(t *testing.T) {
+			d, err := NewCatalogServicesQuery(tc.i)
+			if err != nil {
+				t.Fatal(err)
+			}
+			assert.Equal(t, tc.exp, d.String())
+		})
 	}
 }
